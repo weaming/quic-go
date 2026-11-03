@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +28,17 @@ import (
 	"github.com/apernet/quic-go/qlog"
 	"github.com/apernet/quic-go/qlogwriter"
 )
+
+// capMaxPacketSize 把发送包大小上限钳到 QUIC_GO_MAX_PAYLOAD 指定的值（0 或不设表示不限制）。
+// 用于路径 MTU 黑洞且 PMTUD 无法感知的场景，例如某些跨境链路的单向 MTU 限制。
+func capMaxPacketSize(size protocol.ByteCount) protocol.ByteCount {
+	if v := os.Getenv("QUIC_GO_MAX_PAYLOAD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && protocol.ByteCount(n) < size {
+			return protocol.ByteCount(n)
+		}
+	}
+	return size
+}
 
 type unpacker interface {
 	UnpackLongHeader(hdr *wire.Header, data []byte) (*unpackedPacket, error)
@@ -939,7 +952,7 @@ func (c *Conn) idleTimeoutStartTime() monotime.Time {
 func (c *Conn) switchToNewPath(tr *Transport, now monotime.Time) {
 	initialPacketSize := protocol.ByteCount(c.config.InitialPacketSize)
 	c.sentPacketHandler.MigratedPath(now, initialPacketSize)
-	maxPacketSize := protocol.ByteCount(protocol.MaxPacketBufferSize)
+	maxPacketSize := capMaxPacketSize(protocol.ByteCount(protocol.MaxPacketBufferSize))
 	if c.peerParams.MaxUDPPayloadSize > 0 && c.peerParams.MaxUDPPayloadSize < maxPacketSize {
 		maxPacketSize = c.peerParams.MaxUDPPayloadSize
 	}
@@ -1320,7 +1333,7 @@ func (c *Conn) handleShortHeaderPacket(
 	}
 	c.pathManager.SwitchToPath(p.remoteAddr)
 	c.sentPacketHandler.MigratedPath(p.rcvTime, protocol.ByteCount(c.config.InitialPacketSize))
-	maxPacketSize := protocol.ByteCount(protocol.MaxPacketBufferSize)
+	maxPacketSize := capMaxPacketSize(protocol.ByteCount(protocol.MaxPacketBufferSize))
 	if c.peerParams.MaxUDPPayloadSize > 0 && c.peerParams.MaxUDPPayloadSize < maxPacketSize {
 		maxPacketSize = c.peerParams.MaxUDPPayloadSize
 	}
@@ -2471,7 +2484,7 @@ func (c *Conn) applyTransportParameters() {
 		// Retire the connection ID.
 		c.connIDManager.AddFromPreferredAddress(params.PreferredAddress.ConnectionID, params.PreferredAddress.StatelessResetToken)
 	}
-	maxPacketSize := protocol.ByteCount(protocol.MaxPacketBufferSize)
+	maxPacketSize := capMaxPacketSize(protocol.ByteCount(protocol.MaxPacketBufferSize))
 	if params.MaxUDPPayloadSize > 0 && params.MaxUDPPayloadSize < maxPacketSize {
 		maxPacketSize = params.MaxUDPPayloadSize
 	}
